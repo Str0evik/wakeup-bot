@@ -204,7 +204,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
                     fall_asleep_target = bedtime_target + timedelta(minutes=fall_asleep)
                     
                     text = (
-                        f"🌙 Пора ложиться! Чтобы встать в {formatted_time}, "
+                        f"🌙 Напоминаю! Чтобы встать в {formatted_time}, "
                         f"ложись в {bedtime_target.strftime('%H:%M')} — "
                         f"заснуть нужно до {fall_asleep_target.strftime('%H:%M')}."
                     )
