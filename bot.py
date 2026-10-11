@@ -29,33 +29,35 @@ def init_db():
             wake_datetime TEXT,
             bedtime_time TEXT,
             bedtime_datetime TEXT,
-            bedtime_sent INTEGER DEFAULT 0
+            bedtime_sent INTEGER DEFAULT 0,
+            fall_asleep INTEGER DEFAULT 15
         )
     """)
     conn.commit()
     conn.close()
 
-def save_reminder(chat_id, wake_time, wake_datetime, bedtime_time, bedtime_datetime):
+def save_reminder(chat_id, wake_time, wake_datetime, bedtime_time, bedtime_datetime, fall_asleep):
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO reminders (chat_id, wake_time, sent_count, wake_datetime, bedtime_time, bedtime_datetime, bedtime_sent)
-        VALUES (?, ?, 0, ?, ?, ?, 0)
+        INSERT INTO reminders (chat_id, wake_time, sent_count, wake_datetime, bedtime_time, bedtime_datetime, bedtime_sent, fall_asleep)
+        VALUES (?, ?, 0, ?, ?, ?, 0, ?)
         ON CONFLICT(chat_id) DO UPDATE SET
             wake_time = excluded.wake_time,
             sent_count = 0,
             wake_datetime = excluded.wake_datetime,
             bedtime_time = excluded.bedtime_time,
             bedtime_datetime = excluded.bedtime_datetime,
-            bedtime_sent = 0
-    """, (chat_id, wake_time, wake_datetime, bedtime_time, bedtime_datetime))
+            bedtime_sent = 0,
+            fall_asleep = excluded.fall_asleep
+    """, (chat_id, wake_time, wake_datetime, bedtime_time, bedtime_datetime, fall_asleep))
     conn.commit()
     conn.close()
 
 def get_pending_reminders():
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT chat_id, wake_time, sent_count, wake_datetime, bedtime_time, bedtime_datetime, bedtime_sent FROM reminders")
+    cursor.execute("SELECT chat_id, wake_time, sent_count, wake_datetime, bedtime_time, bedtime_datetime, bedtime_sent, fall_asleep FROM reminders")
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -88,8 +90,6 @@ WAKE_MESSAGES = [
     "🚨 Последнее предупреждение! {time} — вставай немедленно!",
 ]
 
-BEDTIME_MESSAGE = "🌙 Пора ложиться! Чтобы встать в {wake}, тебе нужно заснуть до {bedtime}. Спокойной ночи!"
-
 # --- Обработчик /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -101,12 +101,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
 
-    # Ищем формат: 0536-2031 (пробуждение-отход)
-    match = re.search(r'(\d{4})-(\d{4})', text)
+    # Формат: 0510-2130-15 (пробуждение-отход-засыпание)
+    match = re.search(r'(\d{4})-(\d{4})-(\d+)', text)
 
     if match:
-        wake_code = match.group(1)   # "0536"
-        bedtime_code = match.group(2) # "2031"
+        wake_code = match.group(1)
+        bedtime_code = match.group(2)
+        fall_asleep = int(match.group(3))
 
         formatted_wake = f"{wake_code[:2]}:{wake_code[2:]}"
         formatted_bedtime = f"{bedtime_code[:2]}:{bedtime_code[2:]}"
@@ -120,19 +121,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if wake_dt <= now:
             wake_dt += timedelta(days=1)
 
-        # Время отхода
+        # Время отхода (когда лечь в кровать)
         bedtime_hour = int(bedtime_code[:2])
         bedtime_minute = int(bedtime_code[2:])
         bedtime_dt = now.replace(hour=bedtime_hour, minute=bedtime_minute, second=0, microsecond=0)
-
-        # Если время отхода уже прошло сегодня — ставим на завтра (перед пробуждением)
         if bedtime_dt <= now:
             bedtime_dt += timedelta(days=1)
 
-        # Напоминание — за 30 минут до отхода
+        # Когда нужно заснуть = время отхода + время на засыпание
+        fall_asleep_dt = bedtime_dt + timedelta(minutes=fall_asleep)
+
+        # Напоминание — за 30 минут до отхода (когда нужно ложиться)
         bedtime_reminder_dt = bedtime_dt - timedelta(minutes=30)
 
-        # Если напоминание уже прошло — не ставим
         if bedtime_reminder_dt <= now:
             bedtime_final = None
         else:
@@ -144,23 +145,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 wake_code,
                 wake_dt.isoformat(),
                 bedtime_code,
-                bedtime_final.isoformat()
+                bedtime_final.isoformat(),
+                fall_asleep
             )
             reply = (
                 f"✅ Готово!\n\n"
-                f"🌙 Напомню лечь в {bedtime_final.strftime('%H:%M')}, "
-                f"чтобы заснуть до {formatted_bedtime}.\n"
+                f"🌙 В {bedtime_final.strftime('%H:%M')} напомню, что пора ложиться.\n"
+                f"😴 Заснуть нужно до {fall_asleep_dt.strftime('%H:%M')} "
+                f"(тебе нужно {fall_asleep} мин на засыпание).\n"
                 f"🔔 Разбужу в {formatted_wake} тремя сообщениями.\n\n"
                 f"Спокойной ночи!"
             )
-            print(f"[{now.strftime('%H:%M:%S')}] {update.effective_chat.id}: встать {formatted_wake}, лечь {formatted_bedtime}, напомнить {bedtime_final.strftime('%H:%M')}")
+            print(f"[{now.strftime('%H:%M:%S')}] {update.effective_chat.id}: встать {formatted_wake}, лечь {formatted_bedtime}, заснуть {fall_asleep_dt.strftime('%H:%M')}, напомнить {bedtime_final.strftime('%H:%M')}")
         else:
             save_reminder(
                 update.effective_chat.id,
                 wake_code,
                 wake_dt.isoformat(),
                 bedtime_code,
-                ""
+                "",
+                fall_asleep
             )
             reply = (
                 f"✅ Готово!\n\n"
@@ -181,7 +185,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TIMEZONE)
     print(f"[{now.strftime('%H:%M:%S')}] Проверка напоминаний...")
 
-    for chat_id, wake_time, sent_count, wake_datetime_str, bedtime_time, bedtime_datetime_str, bedtime_sent in get_pending_reminders():
+    for chat_id, wake_time, sent_count, wake_datetime_str, bedtime_time, bedtime_datetime_str, bedtime_sent, fall_asleep in get_pending_reminders():
         formatted_time = f"{wake_time[:2]}:{wake_time[2:]}"
 
         # --- НАПОМИНАНИЕ О СНЕ ---
@@ -194,14 +198,18 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
             if bedtime_dt and now >= bedtime_dt:
                 try:
+                    # Время отхода = напоминание + 30 мин
                     bedtime_target = bedtime_dt + timedelta(minutes=30)
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=BEDTIME_MESSAGE.format(
-                            wake=formatted_time,
-                            bedtime=bedtime_target.strftime("%H:%M")
-                        )
+                    # Время засыпания = отход + fall_asleep
+                    fall_asleep_target = bedtime_target + timedelta(minutes=fall_asleep)
+                    
+                    text = (
+                        f"🌙 Пора ложиться! Чтобы встать в {formatted_time}, "
+                        f"ложись в {bedtime_target.strftime('%H:%M')} — "
+                        f"заснуть нужно до {fall_asleep_target.strftime('%H:%M')}."
                     )
+                    
+                    await context.bot.send_message(chat_id=chat_id, text=text)
                     update_bedtime_sent(chat_id, 1)
                     print(f"[{now.strftime('%H:%M:%S')}] Отправлено bedtime-сообщение для {chat_id}")
                 except Exception as e:
