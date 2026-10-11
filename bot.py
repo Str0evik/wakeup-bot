@@ -17,9 +17,6 @@ if not BOT_TOKEN:
 TIMEZONE_OFFSET = 3
 TIMEZONE = timezone(timedelta(hours=TIMEZONE_OFFSET))
 
-SLEEP_HOURS = 8
-FALL_ASLEEP_MIN = 15
-
 # --- База данных ---
 def init_db():
     conn = sqlite3.connect("reminders.db")
@@ -30,6 +27,7 @@ def init_db():
             wake_time TEXT NOT NULL,
             sent_count INTEGER DEFAULT 0,
             wake_datetime TEXT,
+            bedtime_time TEXT,
             bedtime_datetime TEXT,
             bedtime_sent INTEGER DEFAULT 0
         )
@@ -37,45 +35,46 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_reminder(chat_id: int, wake_time: str, wake_datetime: str, bedtime_datetime: str):
+def save_reminder(chat_id, wake_time, wake_datetime, bedtime_time, bedtime_datetime):
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO reminders (chat_id, wake_time, sent_count, wake_datetime, bedtime_datetime, bedtime_sent)
-        VALUES (?, ?, 0, ?, ?, 0)
+        INSERT INTO reminders (chat_id, wake_time, sent_count, wake_datetime, bedtime_time, bedtime_datetime, bedtime_sent)
+        VALUES (?, ?, 0, ?, ?, ?, 0)
         ON CONFLICT(chat_id) DO UPDATE SET
             wake_time = excluded.wake_time,
             sent_count = 0,
             wake_datetime = excluded.wake_datetime,
+            bedtime_time = excluded.bedtime_time,
             bedtime_datetime = excluded.bedtime_datetime,
             bedtime_sent = 0
-    """, (chat_id, wake_time, wake_datetime, bedtime_datetime))
+    """, (chat_id, wake_time, wake_datetime, bedtime_time, bedtime_datetime))
     conn.commit()
     conn.close()
 
 def get_pending_reminders():
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT chat_id, wake_time, sent_count, wake_datetime, bedtime_datetime, bedtime_sent FROM reminders")
+    cursor.execute("SELECT chat_id, wake_time, sent_count, wake_datetime, bedtime_time, bedtime_datetime, bedtime_sent FROM reminders")
     rows = cursor.fetchall()
     conn.close()
     return rows
 
-def update_sent_count(chat_id: int, count: int):
+def update_sent_count(chat_id, count):
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
     cursor.execute("UPDATE reminders SET sent_count = ? WHERE chat_id = ?", (count, chat_id))
     conn.commit()
     conn.close()
 
-def update_bedtime_sent(chat_id: int, count: int):
+def update_bedtime_sent(chat_id, count):
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
     cursor.execute("UPDATE reminders SET bedtime_sent = ? WHERE chat_id = ?", (count, chat_id))
     conn.commit()
     conn.close()
 
-def delete_reminder(chat_id: int):
+def delete_reminder(chat_id):
     conn = sqlite3.connect("reminders.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM reminders WHERE chat_id = ?", (chat_id,))
@@ -101,69 +100,74 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    match = re.search(r'(\d{4})', text)
+
+    # Ищем формат: 0536-2031 (пробуждение-отход)
+    match = re.search(r'(\d{4})-(\d{4})', text)
 
     if match:
-        time_code = match.group(1)
-        formatted_time = f"{time_code[:2]}:{time_code[2:]}"
+        wake_code = match.group(1)   # "0536"
+        bedtime_code = match.group(2) # "2031"
+
+        formatted_wake = f"{wake_code[:2]}:{wake_code[2:]}"
+        formatted_bedtime = f"{bedtime_code[:2]}:{bedtime_code[2:]}"
 
         now = datetime.now(TIMEZONE)
-        wake_hour = int(time_code[:2])
-        wake_minute = int(time_code[2:])
-        wake_dt = now.replace(hour=wake_hour, minute=wake_minute, second=0, microsecond=0)
 
+        # Время пробуждения
+        wake_hour = int(wake_code[:2])
+        wake_minute = int(wake_code[2:])
+        wake_dt = now.replace(hour=wake_hour, minute=wake_minute, second=0, microsecond=0)
         if wake_dt <= now:
             wake_dt += timedelta(days=1)
 
-        # Вычисляем время отхода ко сну
-        bedtime_dt = wake_dt - timedelta(hours=SLEEP_HOURS, minutes=FALL_ASLEEP_MIN)
+        # Время отхода
+        bedtime_hour = int(bedtime_code[:2])
+        bedtime_minute = int(bedtime_code[2:])
+        bedtime_dt = now.replace(hour=bedtime_hour, minute=bedtime_minute, second=0, microsecond=0)
+
+        # Если время отхода уже прошло сегодня — ставим на завтра (перед пробуждением)
+        if bedtime_dt <= now:
+            bedtime_dt += timedelta(days=1)
+
         # Напоминание — за 30 минут до отхода
         bedtime_reminder_dt = bedtime_dt - timedelta(minutes=30)
 
-        # Определяем, ставить ли bedtime-напоминание
-        minutes_until_bedtime = (bedtime_dt - now).total_seconds() / 60
-
-        if minutes_until_bedtime > 30:
-            # До отхода больше 30 минут — ставим за 30 минут
-            bedtime_final = bedtime_reminder_dt
-            bedtime_note = ""
-        elif 5 < minutes_until_bedtime <= 30:
-            # До отхода 5-30 минут — ставим через 5 минут
-            bedtime_final = now + timedelta(minutes=5)
-            bedtime_note = " (скоро ложиться)"
-        else:
-            # Отход уже прошёл или меньше 5 минут — не ставим
+        # Если напоминание уже прошло — не ставим
+        if bedtime_reminder_dt <= now:
             bedtime_final = None
-            bedtime_note = ""
+        else:
+            bedtime_final = bedtime_reminder_dt
 
         if bedtime_final:
             save_reminder(
                 update.effective_chat.id,
-                time_code,
+                wake_code,
                 wake_dt.isoformat(),
+                bedtime_code,
                 bedtime_final.isoformat()
             )
-            bedtime_str = bedtime_dt.strftime("%H:%M")
             reply = (
                 f"✅ Готово!\n\n"
-                f"🌙 Напомню лечь в {bedtime_final.strftime('%H:%M')}{bedtime_note}, чтобы выспаться.\n"
-                f"🔔 Разбужу в {formatted_time} тремя сообщениями.\n\n"
+                f"🌙 Напомню лечь в {bedtime_final.strftime('%H:%M')}, "
+                f"чтобы заснуть до {formatted_bedtime}.\n"
+                f"🔔 Разбужу в {formatted_wake} тремя сообщениями.\n\n"
                 f"Спокойной ночи!"
             )
-            print(f"[{now.strftime('%H:%M:%S')}] {update.effective_chat.id}: встать {formatted_time}, лечь {bedtime_str}, напоминание {bedtime_final.strftime('%H:%M')}")
+            print(f"[{now.strftime('%H:%M:%S')}] {update.effective_chat.id}: встать {formatted_wake}, лечь {formatted_bedtime}, напомнить {bedtime_final.strftime('%H:%M')}")
         else:
             save_reminder(
                 update.effective_chat.id,
-                time_code,
+                wake_code,
                 wake_dt.isoformat(),
+                bedtime_code,
                 ""
             )
             reply = (
                 f"✅ Готово!\n\n"
-                f"🔔 Разбужу в {formatted_time} тремя сообщениями.\n\n"
+                f"🔔 Разбужу в {formatted_wake} тремя сообщениями.\n\n"
                 f"Спокойной ночи!"
             )
-            print(f"[{now.strftime('%H:%M:%S')}] {update.effective_chat.id}: встать {formatted_time} (без bedtime)")
+            print(f"[{now.strftime('%H:%M:%S')}] {update.effective_chat.id}: встать {formatted_wake} (без bedtime)")
 
         await update.message.reply_text(reply)
     else:
@@ -177,10 +181,10 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TIMEZONE)
     print(f"[{now.strftime('%H:%M:%S')}] Проверка напоминаний...")
 
-    for chat_id, wake_time, sent_count, wake_datetime_str, bedtime_datetime_str, bedtime_sent in get_pending_reminders():
+    for chat_id, wake_time, sent_count, wake_datetime_str, bedtime_time, bedtime_datetime_str, bedtime_sent in get_pending_reminders():
         formatted_time = f"{wake_time[:2]}:{wake_time[2:]}"
 
-        # --- НАПОМИНАНИЕ О СНЕ (только одно) ---
+        # --- НАПОМИНАНИЕ О СНЕ ---
         if bedtime_datetime_str and bedtime_sent == 0:
             try:
                 bedtime_dt = datetime.fromisoformat(bedtime_datetime_str)
@@ -190,7 +194,6 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
             if bedtime_dt and now >= bedtime_dt:
                 try:
-                    # Время, когда нужно заснуть
                     bedtime_target = bedtime_dt + timedelta(minutes=30)
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -213,10 +216,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
         if sent_count == 0 and now >= wake_dt:
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=WAKE_MESSAGES[0].format(time=formatted_time)
-                )
+                await context.bot.send_message(chat_id=chat_id, text=WAKE_MESSAGES[0].format(time=formatted_time))
                 update_sent_count(chat_id, 1)
                 print(f"[{now.strftime('%H:%M:%S')}] Отправлено 1-е wake-сообщение для {chat_id}")
             except Exception as e:
@@ -224,10 +224,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
         elif sent_count == 1 and now >= wake_dt + timedelta(minutes=1):
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=WAKE_MESSAGES[1].format(time=formatted_time)
-                )
+                await context.bot.send_message(chat_id=chat_id, text=WAKE_MESSAGES[1].format(time=formatted_time))
                 update_sent_count(chat_id, 2)
                 print(f"[{now.strftime('%H:%M:%S')}] Отправлено 2-е wake-сообщение для {chat_id}")
             except Exception as e:
@@ -235,10 +232,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
 
         elif sent_count == 2 and now >= wake_dt + timedelta(minutes=2):
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=WAKE_MESSAGES[2].format(time=formatted_time)
-                )
+                await context.bot.send_message(chat_id=chat_id, text=WAKE_MESSAGES[2].format(time=formatted_time))
                 delete_reminder(chat_id)
                 print(f"[{now.strftime('%H:%M:%S')}] Отправлено 3-е wake-сообщение для {chat_id}, напоминание удалено")
             except Exception as e:
